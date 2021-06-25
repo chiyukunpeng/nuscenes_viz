@@ -1,135 +1,128 @@
-from ui.ui_form import Ui_form
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+import numpy as np
+import random
+import time
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('Qt5Agg')
+
+from ui.ui_form_v2 import Ui_MainWindow
 from PyQt5.QtCore import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 
 from utils.nuscenes import *
+from numba import *
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
 
-import os 
-import numpy as np
-import random
-import time
-
-
-class Form(QWidget,Ui_form):
+class Form(QMainWindow,Ui_MainWindow):
 
     def __init__(self):
         super(Form, self).__init__()
         self.setupUi(self)
-        self.sample = {}
-        self.img_cache_path = ''
-        self.rgb_button.clicked.connect(self._show_rgb)
-        self.rgb_lidar_button.clicked.connect(self._show_rgb_lidar)
-        self.rgb_radar_button.clicked.connect(self._show_rgb_radar)
-        self.camera_button.clicked.connect(self._show_camera)
-        self.lidar_button.clicked.connect(self._show_lidar)
-        self.radar_button.clicked.connect(self._show_radar)
+        self.datset_path = ''
+        self.load_dataset_button.clicked.connect(self._load_dataset)
+        self.nusc_viz_button.clicked.connect(self._show_dataset)
 
-    def _show_rgb(self):
+    def _load_dataset(self):
         '''
-            1号窗口：显示原RGB图像
+            1号按钮：加载数据集路径
         '''
-        data_path = QFileDialog.getExistingDirectory(self, "选取数据集文件夹", "./")
-        self.img_cache_path = os.path.join(data_path, 'img_cache')        
-        if not os.path.exists(self.img_cache_path):
-            os.makedirs(self.img_cache_path)
-        self._remove_img_cache(self.img_cache_path)
+        self.dataset_path = QFileDialog.getExistingDirectory(self, "选取数据集文件夹", "./")
+        self.nusc = NuScenes(dataroot=self.dataset_path)
 
-        self.nusc = NuScenes(dataroot=str(data_path))
-        self.sample = self.nusc.sample[random.randint(1,400)]
-        rgb_path = self.nusc.get_sample_data_path(self.sample['data']['CAM_FRONT'])
+    @jit
+    def _show_dataset(self):
+        '''
+            同步显示1-4号窗口
+        '''
+        scene_rec = self.nusc.get('scene', 'c5224b9b454b4ded9b5d2d2634bbda8a')
+        sample_rec = self.nusc.get('sample', scene_rec['first_sample_token'])
+        sd_rec_rgb = self.nusc.get('sample_data', sample_rec['data']['CAM_FRONT'])
+        sd_rec_camera = self.nusc.get('sample_data', sample_rec['data']['CAM_FRONT'])
+        sd_rec_lidar = self.nusc.get('sample_data', sample_rec['data']['LIDAR_TOP'])
+        sd_rec_radar = self.nusc.get('sample_data', sample_rec['data']['RADAR_FRONT'])
+
+        has_more_rgb, has_more_camera, has_more_lidar, has_more_radar = True, True, True, True
+        while has_more_rgb and has_more_camera and has_more_lidar and has_more_radar:
+            t0 = time.time()
+
+            sd_rec_rgb, has_more_rgb = self._show_rgb(sd_rec_rgb) 
+            sd_rec_camera, has_more_camera = self._show_camera(sd_rec_camera)
+            sd_rec_lidar, has_more_lidar = self._show_lidar(sd_rec_lidar)
+            sd_rec_radar, has_more_radar = self._show_radar(sd_rec_radar)
+
+            QApplication.processEvents()
+
+            t1 = time.time()
+            print('time {0}'.format(t1-t0))
+        
+        msgbox = QMessageBox()
+        msgbox.setWindowTitle('INFO')
+        msgbox.setText('Thanks for your watching!')
+        msgbox.exec()
+
+    def _show_rgb(self, sd_rec_rgb):
+        '''
+            1号窗口：动态显示RGB原图像
+        '''
+        sd_rec_rgb, img, has_more_rgb = self.nusc.render_camera_channel(sd_rec_rgb, 
+                                                                                                                                        with_annos=False)
         img_width, img_height = self.rgb_label.width(), self.rgb_label.height()
-        pixmap = QPixmap(rgb_path).scaled(img_width, img_height)
+        qimg = QImage(img, img.shape[1], img.shape[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg).scaled(img_width, img_height)
         self.rgb_label.setPixmap(pixmap)
 
-    def _remove_img_cache(self, filepath):
-        '''
-            清空缓存文件夹中的所有文件
-        '''
-        del_list = os.listdir(filepath)
-        for f in del_list:
-            file_path = os.path.join(filepath, f)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
+        return sd_rec_rgb, has_more_rgb
 
-    def _show_rgb_lidar(self):
+    def _show_camera(self, sd_rec_camera):
         '''
-            2号窗口：显示Lidar点云投影后的RGB图像
+            2号窗口：动态显示含GT框的camera输出
         '''
-        img_name = time.strftime('%H%M%S') + '.jpg'
-        out_path = self.img_cache_path + '/' + img_name
-        self.nusc.render_pointcloud_in_image(self.sample['token'],
-                                                                                        pointsensor_channel='LIDAR_TOP',
-                                                                                        camera_channel='CAM_FRONT',
-                                                                                        render_intensity=True,
-                                                                                        out_path=out_path,
-                                                                                        verbose=False)
-
-        img_width, img_height = self.rgb_lidar_label.width(), self.rgb_lidar_label.height()
-        pixmap = QPixmap(out_path).scaled(img_width, img_height)
-        self.rgb_lidar_label.setPixmap(pixmap)
-
-    def _show_rgb_radar(self):
-        '''
-            3号窗口：显示Radar点云投影后的RGB图像
-        '''
-        img_name = time.strftime('%H%M%S') + '.jpg'
-        out_path = self.img_cache_path + '/' + img_name
-        self.nusc.render_pointcloud_in_image(self.sample['token'],
-                                                                                        pointsensor_channel='RADAR_FRONT',
-                                                                                        camera_channel='CAM_FRONT',
-                                                                                        out_path=out_path,
-                                                                                        verbose=False)
-        
-        img_width, img_height = self.rgb_radar_label.width(), self.rgb_radar_label.height()
-        pixmap = QPixmap(out_path).scaled(img_width, img_height)
-        self.rgb_radar_label.setPixmap(pixmap)
-
-    def _show_camera(self):
-        '''
-            4号窗口：显示含GT框的Camera输出
-        '''
-        img_name = time.strftime('%H%M%S') + '.jpg'
-        out_path = self.img_cache_path + '/' + img_name
-        self.nusc.render_sample_data(self.sample['data']['CAM_FRONT'],
-                                                                        out_path=out_path,
-                                                                        verbose=False)
-        
+        sd_rec_camera, img, has_more_camera = self.nusc.render_camera_channel(sd_rec_camera, 
+                                                                                                                                                                    with_annos=True)
         img_width, img_height = self.camera_label.width(), self.camera_label.height()
-        pixmap = QPixmap(out_path).scaled(img_width, img_height)
+        qimg = QImage(img, img.shape[1], img.shape[0], QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimg).scaled(img_width, img_height)
         self.camera_label.setPixmap(pixmap)
 
-    def _show_lidar(self):
-        '''
-            5号窗口：显示含GT框的Lidar输出
-        '''
-        img_name = time.strftime('%H%M%S') + '.jpg'
-        out_path = self.img_cache_path + '/' + img_name
-        self.nusc.render_sample_data(self.sample['data']['LIDAR_TOP'],
-                                                                        nsweeps=10,
-                                                                        underlay_map=True,
-                                                                        out_path=out_path,
-                                                                        verbose=False)
-        
-        img_width, img_height = self.lidar_label.width(), self.lidar_label.height()
-        pixmap = QPixmap(out_path).scaled(img_width, img_height)
-        self.lidar_label.setPixmap(pixmap)
+        return sd_rec_camera, has_more_camera
 
-    def _show_radar(self):
+    @jit
+    def _show_lidar(self, sd_rec_lidar):
         '''
-            6号窗口：显示含GT框的Radar输出
+            3号窗口：动态显示含GT框的lidar输出
         '''
-        img_name = time.strftime('%H%M%S') + '.jpg'
-        out_path = self.img_cache_path + '/' + img_name
-        self.nusc.render_sample_data(self.sample['data']['RADAR_FRONT'],
-                                                                        nsweeps=10,
-                                                                        underlay_map=True,
-                                                                        out_path=out_path,
-                                                                        verbose=False)
-        
-        img_width, img_height = self.radar_label.width(), self.radar_label.height()
-        pixmap = QPixmap(out_path).scaled(img_width, img_height)
-        self.radar_label.setPixmap(pixmap)
+        self.lidar_figure.clear()
+        ax = self.lidar_figure.add_subplot(111)
+        sd_rec_lidar, has_more_lidar = self.nusc.render_pc_channel(sd_rec_lidar,
+                                                                                                    ax=ax, 
+                                                                                                    underlay_map=True,
+                                                                                                    with_anns=True,
+                                                                                                    use_flat_vehicle_coordinates=True)
+        self.lidar_canvas.draw()
+
+        return sd_rec_lidar, has_more_lidar
+
+    @jit
+    def _show_radar(self, sd_rec_radar):
+        '''
+            4号窗口：动态显示含GT框的radar输出
+        '''
+        self.radar_figure.clear()
+        ax = self.radar_figure.add_subplot(111)
+        sd_rec_radar, has_more_radar = self.nusc.render_pc_channel(sd_rec_radar, 
+                                                                                                    channel='RADAR_FRONT',
+                                                                                                    ax=ax,
+                                                                                                    underlay_map=True,
+                                                                                                    with_anns=True,
+                                                                                                    use_flat_vehicle_coordinates=True)
+        self.radar_canvas.draw()
+
+        return sd_rec_radar, has_more_radar
 
 
 if __name__ == '__main__': 
@@ -137,4 +130,3 @@ if __name__ == '__main__':
     ui = Form()
     ui.show()
     sys.exit(app.exec_())
-
