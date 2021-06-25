@@ -1,14 +1,12 @@
 # NuScenes_Viz
 
-This project aims to develop a tool to visualize datasets like [nuScenes](https://www.nuscenes.org/nuscenes). It consists of six windows:
+This project aims to develop a tool to visualize datasets like [nuScenes](https://www.nuscenes.org/nuscenes). It consists of four windows:
 * raw image
-* raw image with lidar point cloud
-* raw image with radar point cloud
 * raw image with annos
 * lidar point cloud with annos
 * radar point cloud with annos
 
-![img](img/demo.png)
+![img](img/nuscenes_viz_v2.png)
 
 ## Quick Start
 
