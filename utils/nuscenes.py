@@ -598,6 +598,153 @@ class NuScenes:
                                             dpi=dpi,
                                             lidarseg_preds_folder=lidarseg_preds_folder)
 
+    def render_ego_centric_map(self,
+                            sample_data_token: str,
+                            axes_limit: float = 40,
+                            ax: Axes = None) -> None:
+        self.explorer.render_ego_centric_map(sample_data_token,
+                                                                                        axes_limit=40,
+                                                                                        ax=ax)
+
+    def render_pc_channel(self,
+                           sd_record:dict,
+                           channel: str = 'LIDAR_TOP',
+                           with_anns: bool = True,
+                           box_vis_level: BoxVisibility = BoxVisibility.ANY,
+                           axes_limit: float = 40,
+                           ax: Axes = None,
+                           out_path: str='radar_cache',
+                           nsweeps: int = 1,
+                           underlay_map: bool = True,
+                           use_flat_vehicle_coordinates: bool = True) -> str:
+
+        # Get scene data.
+        sensor_modality = sd_record['sensor_modality']
+        sample_rec = self.get('sample', sd_record['sample_token'])
+        chan = sd_record['channel']
+        ref_chan = 'LIDAR_TOP'
+        ref_sd_token = sample_rec['data'][ref_chan]
+        ref_sd_record = self.get('sample_data', ref_sd_token)
+
+        if sensor_modality == 'lidar':
+            # Get aggregated lidar point cloud in lidar frame.
+            pc, times = LidarPointCloud.from_file_multisweep(self, sample_rec, chan, ref_chan, nsweeps=nsweeps)
+            velocities = None
+        else:
+            # Get aggregated radar point cloud in reference frame.
+            # The point cloud is transformed to the reference frame for visualization purposes.
+            pc, times = RadarPointCloud.from_file_multisweep(self, sample_rec, chan, ref_chan, nsweeps=nsweeps)
+            velocities = None
+
+        # By default we render the sample_data top down in the sensor frame.
+        # This is slightly inaccurate when rendering the map as the sensor frame may not be perfectly upright.
+        # Using use_flat_vehicle_coordinates we can render the map in the ego frame instead.
+        if use_flat_vehicle_coordinates:
+            # Retrieve transformation matrices for reference point cloud.
+            cs_record = self.get('calibrated_sensor', ref_sd_record['calibrated_sensor_token'])
+            pose_record = self.get('ego_pose', ref_sd_record['ego_pose_token'])
+            ref_to_ego = transform_matrix(translation=cs_record['translation'],
+                                            rotation=Quaternion(cs_record["rotation"]))
+
+            # Compute rotation between 3D vehicle pose and "flat" vehicle pose (parallel to global z plane).
+            ego_yaw = Quaternion(pose_record['rotation']).yaw_pitch_roll[0]
+            rotation_vehicle_flat_from_vehicle = np.dot(
+                Quaternion(scalar=np.cos(ego_yaw / 2), vector=[0, 0, np.sin(ego_yaw / 2)]).rotation_matrix,
+                Quaternion(pose_record['rotation']).inverse.rotation_matrix)
+            vehicle_flat_from_vehicle = np.eye(4)
+            vehicle_flat_from_vehicle[:3, :3] = rotation_vehicle_flat_from_vehicle
+            viewpoint = np.dot(vehicle_flat_from_vehicle, ref_to_ego)
+        else:
+            viewpoint = np.eye(4)
+
+        # Init axes.
+        if ax is None:
+            _, ax = plt.subplots(1, 1, figsize=(9, 9))
+
+        # Render map if requested.
+        if underlay_map:
+            assert use_flat_vehicle_coordinates, 'Error: underlay_map requires use_flat_vehicle_coordinates, as ' \
+                                                    'otherwise the location does not correspond to the map!'
+            self.render_ego_centric_map(sample_data_token=sample_rec['data'][channel], axes_limit=axes_limit, ax=ax)
+
+        # Show point cloud.
+        points = view_points(pc.points[:3, :], viewpoint, normalize=False)
+        dists = np.sqrt(np.sum(pc.points[:2, :] ** 2, axis=0))   
+        colors = np.minimum(1, dists / axes_limit / np.sqrt(2))
+        point_scale = 0.2 if sensor_modality == 'lidar' else 3.0
+
+        scatter = ax.scatter(points[0, :], points[1, :], c=colors, s=point_scale)
+
+        # Show ego vehicle.
+        ax.plot(0, 0, 'x', color='red')
+
+        # Get boxes in lidar frame.
+        _, boxes, _ = self.get_sample_data(ref_sd_token, box_vis_level=box_vis_level,
+                                                use_flat_vehicle_coordinates=use_flat_vehicle_coordinates)
+
+        # Show boxes.
+        if with_anns:
+            for box in boxes:
+                c = np.array(self.colormap[box.name]) / 255.0
+                box.render(ax, view=np.eye(4), colors=(c, c, c))
+        
+        # Limit visible range.
+        ax.set_xlim(-axes_limit, axes_limit)
+        ax.set_ylim(-axes_limit, axes_limit)
+
+        ax.axis('off')
+        ax.set_aspect('equal')
+
+        # plt.savefig(out_path, bbox_inches='tight', pad_inches=0, dpi=200)
+
+        if not sd_record['next'] == "":
+            sd_record = self.get('sample_data', sd_record['next'])
+            has_more_frames = True
+        else:
+            has_more_frames = False
+        
+        return sd_record, has_more_frames
+
+    def render_camera_channel(self,
+                             sd_rec: dict ,
+                             freq: float = 10,
+                             with_annos: bool = False,
+                             imsize: Tuple[float, float] = (640, 360)) -> np.array:
+        """
+        Renders a full scene for a particular camera channel.
+        :param scene_token: Unique identifier of scene to render.
+        :param channel: Channel to render.
+        :param freq: Display frequency (Hz).
+        :param imsize: Size of image to render. The larger the slower this will run.
+        return: sd_rec(dict), img(np.array), has_more_frame(bool)
+        """
+
+        # Get data from DB.
+        impath, boxes, camera_intrinsic = self.get_sample_data(sd_rec['token'], box_vis_level=BoxVisibility.ANY)
+
+        # Load and render.
+        if not osp.exists(impath):
+            raise Exception('Error: Missing image %s' % impath)
+        im = cv2.imread(impath)
+
+        # with annos if requested.
+        if with_annos:
+            for box in boxes:
+                c = self.colormap[box.name]
+                box.render_cv2(im, view=camera_intrinsic, normalize=True, colors=(c, c, c))
+
+        # Render.
+        im = cv2.resize(im, imsize)
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+
+        if not sd_rec['next'] == "":
+            sd_rec = self.get('sample_data', sd_rec['next'])
+            has_more_frames = True
+        else:
+            has_more_frames = False
+
+        return sd_rec, im, has_more_frames
+
 
 
 class NuScenesExplorer:
